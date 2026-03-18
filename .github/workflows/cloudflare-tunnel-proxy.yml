@@ -1,0 +1,214 @@
+name: Cloudflare Tunnel Proxy Node
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        type: string
+        description: 'Keep-alive duration in hours'
+        required: false
+        default: '5'
+      proxy_mode:
+        type: string
+        description: 'Proxy mode: ss (Shadowsocks) / vless (Xray VLESS+WS)'
+        required: false
+        default: 'vless'
+      cf_tunnel_mode:
+        type: string
+        description: 'Tunnel mode: quick (no account needed) / named (needs CF token)'
+        required: false
+        default: 'quick'
+
+jobs:
+  proxy-node:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+
+    steps:
+      - name: System Information
+        run: |
+          echo "=== System Info ==="
+          uname -a
+          cat /etc/os-release
+          df -h
+          free -h
+          nproc
+          echo ""
+          echo "Public IP: $(curl -s --max-time 5 ifconfig.me || curl -s --max-time 5 icanhazip.com)"
+
+      - name: Configure SSH Access
+        env:
+          GH_SSH_ROOT_PASS: ${{ secrets.GH_SSH_ROOT_PASS }}
+          GH_SSH_USER_PASS: ${{ secrets.GH_SSH_USER_PASS }}
+        run: |
+          USER_PASS="${GH_SSH_USER_PASS:-123456}"
+          sudo useradd -m -s /bin/bash jiro 2>/dev/null || true
+          echo "jiro:${USER_PASS}" | sudo chpasswd
+          sudo sh -c 'echo "jiro ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers'
+
+          ROOT_PASS="${GH_SSH_ROOT_PASS:-nihao}"
+          sudo sed -i 's/^#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo systemctl restart ssh
+          echo "root:${ROOT_PASS}" | sudo chpasswd
+
+      - name: Install cloudflared
+        run: |
+          curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o /tmp/cloudflared.deb
+          sudo dpkg -i /tmp/cloudflared.deb
+          cloudflared version
+
+      - name: Deploy Proxy Service
+        id: proxy
+        env:
+          PROXY_MODE: ${{ github.event.inputs.proxy_mode || 'vless' }}
+          SS_PASSWORD: ${{ secrets.SS_PASSWORD || '123456' }}
+          VLESS_UUID: ${{ secrets.VLESS_UUID }}
+        run: |
+          if [ -z "$VLESS_UUID" ]; then
+            VLESS_UUID=$(cat /proc/sys/kernel/random/uuid)
+          fi
+          echo "vless_uuid=${VLESS_UUID}" >> $GITHUB_OUTPUT
+          echo "proxy_mode=${PROXY_MODE}" >> $GITHUB_OUTPUT
+
+          if [ "$PROXY_MODE" = "vless" ]; then
+            echo ">>> Deploying Xray VLESS + WebSocket..."
+            wget -q "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip" -O /tmp/xray.zip
+            sudo mkdir -p /opt/xray
+            sudo unzip -o /tmp/xray.zip -d /opt/xray
+            sudo chmod +x /opt/xray/xray
+
+            cat > /tmp/xray-config.json << XEOF
+          {
+            "log": { "loglevel": "warning" },
+            "inbounds": [{
+              "port": 8080,
+              "listen": "127.0.0.1",
+              "protocol": "vless",
+              "settings": {
+                "clients": [{ "id": "${VLESS_UUID}", "level": 0 }],
+                "decryption": "none"
+              },
+              "streamSettings": {
+                "network": "ws",
+                "wsSettings": { "path": "/ws" }
+              }
+            }],
+            "outbounds": [{
+              "protocol": "freedom",
+              "settings": {}
+            }]
+          }
+          XEOF
+            sudo cp /tmp/xray-config.json /opt/xray/config.json
+            sudo /opt/xray/xray run -config /opt/xray/config.json &
+            sleep 2
+            echo "proxy_running=true" >> $GITHUB_OUTPUT
+            echo "proxy_port=8080" >> $GITHUB_OUTPUT
+          else
+            echo ">>> Deploying Shadowsocks..."
+            docker run -d \
+              --name shadowsocks \
+              --restart unless-stopped \
+              -p 127.0.0.1:8080:8080/tcp \
+              ghcr.io/shadowsocks/ssserver-rust:latest \
+              ssserver -s "0.0.0.0:8080" \
+              -m "aes-256-gcm" \
+              -k "${SS_PASSWORD}"
+            sleep 3
+            echo "proxy_running=true" >> $GITHUB_OUTPUT
+            echo "proxy_port=8080" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Start Cloudflare Tunnel
+        id: tunnel
+        env:
+          CF_TUNNEL_MODE: ${{ github.event.inputs.cf_tunnel_mode || 'quick' }}
+          CF_TUNNEL_TOKEN: ${{ secrets.CF_TUNNEL_TOKEN }}
+          PROXY_PORT: ${{ steps.proxy.outputs.proxy_port }}
+        run: |
+          PROXY_PORT="${PROXY_PORT:-8080}"
+
+          if [ "$CF_TUNNEL_MODE" = "named" ] && [ -n "$CF_TUNNEL_TOKEN" ]; then
+            cloudflared tunnel --protocol http2 run --token "${CF_TUNNEL_TOKEN}" &
+            sleep 5
+            echo "tunnel_mode=named" >> $GITHUB_OUTPUT
+            echo "tunnel_running=true" >> $GITHUB_OUTPUT
+          else
+            echo ">>> Starting Quick Tunnel..."
+            cloudflared tunnel --protocol http2 --url http://127.0.0.1:${PROXY_PORT} > /tmp/cloudflared.log 2>&1 &
+            
+            for i in $(seq 1 30); do
+              TUNNEL_URL=$(grep -oP 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cloudflared.log | head -1)
+              if [ -n "$TUNNEL_URL" ]; then break; fi
+              sleep 2
+            done
+
+            if [ -n "$TUNNEL_URL" ]; then
+              echo "Quick Tunnel: ${TUNNEL_URL}"
+              echo "tunnel_mode=quick" >> $GITHUB_OUTPUT
+              echo "tunnel_running=true" >> $GITHUB_OUTPUT
+              echo "tunnel_url=${TUNNEL_URL}" >> $GITHUB_OUTPUT
+            else
+              echo "tunnel_running=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: Display Connection Info
+        env:
+          PROXY_MODE: ${{ steps.proxy.outputs.proxy_mode }}
+          VLESS_UUID: ${{ steps.proxy.outputs.vless_uuid }}
+          TUNNEL_URL: ${{ steps.tunnel.outputs.tunnel_url }}
+        run: |
+          echo "=========================================================="
+          echo "  PROXY NODE READY"
+          echo "=========================================================="
+          if [ "$PROXY_MODE" = "vless" ]; then
+            CF_HOST=$(echo "${TUNNEL_URL}" | sed 's|https://||')
+            VLESS_LINK="vless://${VLESS_UUID}@${CF_HOST}:443?encryption=none&security=tls&sni=${CF_HOST}&type=ws&host=${CF_HOST}&path=%2Fws#GH-CF-Proxy"
+            echo ""
+            echo "VLESS Link:"
+            echo "${VLESS_LINK}"
+            echo ""
+            echo "## VLESS Link" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo "${VLESS_LINK}" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Send to Feishu
+        if: steps.tunnel.outputs.tunnel_running == 'true'
+        env:
+          FS_TOKEN: ${{ secrets.FS_TOKEN }}
+          PROXY_MODE: ${{ steps.proxy.outputs.proxy_mode }}
+          VLESS_UUID: ${{ steps.proxy.outputs.vless_uuid }}
+          TUNNEL_URL: ${{ steps.tunnel.outputs.tunnel_url }}
+        run: |
+          if [ -z "$FS_TOKEN" ]; then
+            echo "FS_TOKEN not configured"
+            exit 0
+          fi
+
+          if [ "$PROXY_MODE" = "vless" ]; then
+            CF_HOST=$(echo "${TUNNEL_URL}" | sed 's|https://||')
+            VLESS_LINK="vless://${VLESS_UUID}@${CF_HOST}:443?encryption=none&security=tls&sni=${CF_HOST}&type=ws&host=${CF_HOST}&path=%2Fws#GH-CF-Proxy"
+            CONTENT="github\n\n${VLESS_LINK}"
+          else
+            CONTENT="github\n\nSS Server: ${TUNNEL_URL}"
+          fi
+
+          webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/${FS_TOKEN}"
+          message=$(printf '{"msg_type":"text","content":{"text":"%s"}}' "$CONTENT")
+          curl -s -H "Content-Type: application/json" -X POST -d "$message" "$webhook_url"
+          echo "Sent to Feishu"
+
+      - name: Keep Alive
+        env:
+          DURATION: ${{ github.event.inputs.duration || '5' }}
+        run: |
+          echo "Keeping alive for ${DURATION} hours..."
+          END_TIME=$(($(date +%s) + ${DURATION} * 3600))
+          while [ $(date +%s) -lt $END_TIME ]; do
+            sleep 300
+            echo "[$(date)] Health check OK"
+          done
