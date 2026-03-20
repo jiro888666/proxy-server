@@ -199,7 +199,25 @@ jobs:
 
           webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/${FS_TOKEN}"
           message=$(printf '{"msg_type":"text","content":{"text":"%s"}}' "$CONTENT")
-          curl -s -H "Content-Type: application/json" -X POST -d "$message" "$webhook_url"
+          # curl -s -H "Content-Type: application/json" -X POST -d "$message" "$webhook_url"
+          # 定义最大重试次数和初始等待时间
+          max_retries=3
+          wait_time=1
+          
+          for i in $(seq 1 $max_retries); do
+              response=$(curl -s -H "Content-Type: application/json" -X POST -d "$message" "$webhook_url")
+              
+              # 检查是否包含频率限制错误
+              if echo "$response" | grep -q '"code":11232'; then
+                  echo "Rate limited, retrying in ${wait_time}s... (attempt $i)"
+                  sleep $wait_time
+                  wait_time=$((wait_time * 2))  # 指数退避
+              else
+                  echo "Message sent successfully or other error:"
+                  echo "$response"
+                  break
+              fi
+          done
           echo "Sent to Feishu"
 
       - name: Keep Alive
