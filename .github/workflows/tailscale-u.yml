@@ -30,6 +30,7 @@ jobs:
         run: |
           sudo tailscale up --authkey=${TS_KEY} \
             --hostname=gh-node \
+            --ssh \
             --accept-routes
           
           echo "=========================================="
@@ -39,13 +40,12 @@ jobs:
           echo "=========================================="
           echo "SSH: ssh root@gh-node"
           echo "=========================================="
-          sudo tailscale up --ssh --advertise-exit-node --reset
           tailscale status
           
 
       - name: Get Tailscale Hostname and Notify Feishu
         env:
-          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FS_TOKEN: ${{ secrets.FS_TOKEN }}
         run: |
           webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/${FS_TOKEN}"
           TS_HOSTNAME=$(tailscale status --json | jq -r '.Self.Hostname')
