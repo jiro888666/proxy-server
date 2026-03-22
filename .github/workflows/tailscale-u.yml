@@ -10,6 +10,7 @@ jobs:
     timeout-minutes: 330
     
     steps:
+      - uses: actions/checkout@v3
       - name: Install Tailscale
         run: curl -fsSL https://tailscale.com/install.sh | sudo sh
         
@@ -41,8 +42,6 @@ jobs:
           echo "SSH: ssh root@gh-node"
           echo "=========================================="
           tailscale status
-
-      - uses: actions/checkout@v3
 
       - name: Get Tailscale Hostname and Notify Feishu
         env:
