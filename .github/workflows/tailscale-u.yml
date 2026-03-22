@@ -41,6 +41,12 @@ jobs:
           echo "SSH: ssh root@gh-node"
           echo "=========================================="
           tailscale status
+
+      - name: Copy scripts to /app
+        run: |
+          sudo cp -r ./scripts /
+          sudo chmod +x /scripts/*.sh
+          ls -la /scripts/
           
 
       - name: Get Tailscale Hostname and Notify Feishu
