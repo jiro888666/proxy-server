@@ -48,7 +48,7 @@ jobs:
           FS_TOKEN: ${{ secrets.FS_TOKEN }}
         run: |
           webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/${FS_TOKEN}"
-          TS_HOSTNAME=$(tailscale status --json | jq -r '.Self.Hostname')
+          TS_HOSTNAME=$(tailscale status --json | jq -r '.Self.HostName')
           TS_IP=$(tailscale ip -4)
           echo "Hostname: $TS_HOSTNAME"
           echo "IP: $TS_IP"
