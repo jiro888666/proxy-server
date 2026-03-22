@@ -1,0 +1,66 @@
+name: Tailscale Node
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+
+jobs:
+  connect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    
+    steps:
+      - name: Install Tailscale
+        run: curl -fsSL https://tailscale.com/install.sh | sudo sh
+        
+      - name: Setup SSH Root Password
+        env:
+          GH_TS_PASS: ${{ secrets.GH_TS_PASS }}
+        run: |
+          PASSWORD="${GH_TS_PASS:-ghnode123}"
+          echo "root:${PASSWORD}" | sudo chpasswd
+          sudo sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+          sudo service ssh restart
+          echo "Root password configured"
+        
+      - name: Connect to Tailscale
+        env:
+          TS_KEY: ${{ secrets.TS_KEY }}
+        run: |
+          sudo tailscale up --authkey=${TS_KEY} \
+            --hostname=gh-node \
+            --accept-routes
+          
+          echo "=========================================="
+          echo "Connected!"
+          echo "Hostname: gh-node"
+          echo "Tailscale IP: $(tailscale ip -4)"
+          echo "=========================================="
+          echo "SSH: ssh root@gh-node"
+          echo "=========================================="
+          sudo tailscale up --ssh --advertise-exit-node --reset
+          tailscale status
+          
+
+      - name: Get Tailscale Hostname and Notify Feishu
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+        run: |
+          webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/${FS_TOKEN}"
+          TS_HOSTNAME=$(tailscale status --json | jq -r '.Self.Hostname')
+          TS_IP=$(tailscale ip -4)
+          echo "Hostname: $TS_HOSTNAME"
+          echo "IP: $TS_IP"
+          
+          curl -s -X POST $webhook_url \
+            -H "Content-Type: application/json" \
+            -d "{
+                  \"msg_type\": \"text\", 
+                  \"content\": {\"text\": \"Tailscale Hostname: $TS_HOSTNAME\nTailscale IP: $TS_IP\"}
+                }"
+           
+      - name: Keep Alive
+        run: |
+          echo "Node online. SSH: ssh root@gh-node"
+          sleep 5h
