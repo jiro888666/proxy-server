@@ -53,6 +53,8 @@ jobs:
           echo "root:${ROOT_PASS}" | sudo chpasswd
 
       - name: Install cloudflared
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           echo ">>> Downloading cloudflared via GitHub API..."
           gh release download --repo cloudflare/cloudflared --pattern 'cloudflared-linux-amd64.deb' --dir /tmp
@@ -62,6 +64,7 @@ jobs:
       - name: Deploy Proxy Service
         id: proxy
         env:
+          GH_TOKEN: ${{ github.token }}
           PROXY_MODE: ${{ github.event.inputs.proxy_mode || 'vless' }}
           SS_PASSWORD: ${{ secrets.SS_PASSWORD || '123456' }}
           VLESS_UUID: ${{ secrets.VLESS_UUID }}
