@@ -54,8 +54,9 @@ jobs:
 
       - name: Install cloudflared
         run: |
-          curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o /tmp/cloudflared.deb
-          sudo dpkg -i /tmp/cloudflared.deb
+          echo ">>> Downloading cloudflared via GitHub API..."
+          gh release download --repo cloudflare/cloudflared --pattern 'cloudflared-linux-amd64.deb' --dir /tmp
+          sudo dpkg -i /tmp/cloudflared-linux-amd64.deb
           cloudflared version
 
       - name: Deploy Proxy Service
@@ -73,7 +74,11 @@ jobs:
 
           if [ "$PROXY_MODE" = "vless" ]; then
             echo ">>> Deploying Xray VLESS + WebSocket..."
-            wget -q "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip" -O /tmp/xray.zip
+            echo ">>> Downloading Xray-core..."
+            wget -q "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip" -O /tmp/xray.zip || {
+              echo "wget failed, trying gh release download..."
+              gh release download --repo XTLS/Xray-core --pattern 'Xray-linux-64.zip' --dir /tmp
+            }
             sudo mkdir -p /opt/xray
             sudo unzip -o /tmp/xray.zip -d /opt/xray
             sudo chmod +x /opt/xray/xray
@@ -199,19 +204,15 @@ jobs:
 
           webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/${FS_TOKEN}"
           message=$(printf '{"msg_type":"text","content":{"text":"%s"}}' "$CONTENT")
-          # curl -s -H "Content-Type: application/json" -X POST -d "$message" "$webhook_url"
-          # 定义最大重试次数和初始等待时间
           max_retries=3
           wait_time=1
           
           for i in $(seq 1 $max_retries); do
               response=$(curl -s -H "Content-Type: application/json" -X POST -d "$message" "$webhook_url")
-              
-              # 检查是否包含频率限制错误
               if echo "$response" | grep -q '"code":11232'; then
                   echo "Rate limited, retrying in ${wait_time}s... (attempt $i)"
                   sleep $wait_time
-                  wait_time=$((wait_time * 2))  # 指数退避
+                  wait_time=$((wait_time * 2))
               else
                   echo "Message sent successfully or other error:"
                   echo "$response"
