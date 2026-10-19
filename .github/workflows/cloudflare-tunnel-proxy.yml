@@ -2,14 +2,14 @@ name: Cloudflare Tunnel Proxy Node
 
 on:
   schedule:
-    - cron: '0 */5 * * *'
+    - cron: '0 */4 * * *'
   workflow_dispatch:
     inputs:
       duration:
         type: string
         description: 'Keep-alive duration in hours'
         required: false
-        default: '6'
+        default: '5'
       proxy_mode:
         type: string
         description: 'Proxy mode: ss (Shadowsocks) / vless (Xray VLESS+WS)'
@@ -24,7 +24,7 @@ on:
 jobs:
   proxy-node:
     runs-on: ubuntu-latest
-    timeout-minutes: 390
+    timeout-minutes: 330
 
     steps:
       - name: System Information
@@ -228,7 +228,7 @@ jobs:
 
       - name: Keep Alive
         env:
-          DURATION: ${{ github.event.inputs.duration || '6' }}
+          DURATION: ${{ github.event.inputs.duration || '5' }}
         run: |
           echo "Keeping alive for ${DURATION} hours..."
           END_TIME=$(($(date +%s) + ${DURATION} * 3600))
