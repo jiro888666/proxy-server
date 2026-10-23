@@ -1,8 +1,6 @@
 name: Cloudflare Tunnel Proxy Node
 
 on:
-  schedule:
-    - cron: '0 */4 * * *'
   workflow_dispatch:
     inputs:
       duration:
