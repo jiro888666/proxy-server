@@ -179,14 +179,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view vpn-ip-test >/dev/null 2>&1; then
-            gh release edit vpn-ip-test --notes-file /tmp/body.md
-            echo "updated existing release"
+          REPO="${{ github.repository }}"
+          python3 -c "import json; print(json.dumps({'tag_name':'vpn-ip-test','name':'VPN IP test links','draft':True,'body':open('/tmp/body.md').read()}))" > /tmp/rel.json
+          REL_ID=$(gh api "repos/$REPO/releases" --jq '[.[] | select(.tag_name=="vpn-ip-test")][0].id' 2>/dev/null || true)
+          if [ -n "$REL_ID" ] && [ "$REL_ID" != "null" ]; then
+            gh api -X PATCH "repos/$REPO/releases/$REL_ID" --input /tmp/rel.json --jq '"updated id=" + (.id|tostring)'
           else
-            gh release create vpn-ip-test --draft --title "VPN IP test links" --notes-file /tmp/body.md
-            echo "created release"
+            gh api -X POST "repos/$REPO/releases" --input /tmp/rel.json --jq '"created id=" + (.id|tostring)'
           fi
-          gh release view vpn-ip-test --json isDraft,url --jq '{isDraft,url}'
 
       - name: Keep Alive
         env:
