@@ -1,0 +1,207 @@
+name: CF IP Test (no feishu)
+
+# 测试用：同一个 quick tunnel，生成多条指向不同 Cloudflare 边缘 IP 的 VLESS 链接
+# 目的：客户端只需导入链接，不改任何设置，直接对比哪个 IP 快
+# 不发飞书，结果写入 draft release "vpn-ip-test"，用完删掉
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        type: string
+        description: 'Keep-alive duration in hours'
+        required: false
+        default: '4'
+      ips:
+        type: string
+        description: 'Comma-separated CF edge IPs'
+        required: false
+        default: '162.159.140.1,104.26.0.1,198.41.200.1,104.27.0.1,172.64.80.1,104.18.100.1'
+
+permissions:
+  contents: write
+
+jobs:
+  proxy-node:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+
+    steps:
+      - name: Show runner location
+        run: |
+          echo "Runner IP: $(curl -s --max-time 5 ifconfig.me)"
+          curl -s --max-time 5 "http://ip-api.com/json/$(curl -s --max-time 5 ifconfig.me)?fields=country,city,isp" || true
+
+      - name: Tune kernel (BBR + FastOpen)
+        run: |
+          sudo sysctl -w net.core.default_qdisc=fq || true
+          sudo sysctl -w net.ipv4.tcp_congestion_control=bbr || true
+          sudo sysctl -w net.ipv4.tcp_fastopen=3 || true
+          sudo sysctl -w net.core.rmem_max=16777216 || true
+          sudo sysctl -w net.core.wmem_max=16777216 || true
+          sysctl net.ipv4.tcp_congestion_control
+
+      - name: Install cloudflared
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download --repo cloudflare/cloudflared --pattern 'cloudflared-linux-amd64.deb' --dir /tmp
+          sudo dpkg -i /tmp/cloudflared-linux-amd64.deb
+          cloudflared version
+
+      - name: Deploy Xray VLESS+WS
+        id: proxy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VLESS_UUID=$(cat /proc/sys/kernel/random/uuid)
+          echo "uuid=${VLESS_UUID}" >> "$GITHUB_OUTPUT"
+
+          wget -q "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip" -O /tmp/xray.zip || {
+            echo "wget failed, falling back to gh"
+            gh release download --repo XTLS/Xray-core --pattern 'Xray-linux-64.zip' --dir /tmp
+          }
+          sudo mkdir -p /opt/xray
+          sudo unzip -o /tmp/xray.zip -d /opt/xray
+          sudo chmod +x /opt/xray/xray
+
+          cat > /tmp/xray-config.json << XEOF
+          {
+            "log": { "loglevel": "warning" },
+            "inbounds": [{
+              "port": 8080,
+              "listen": "127.0.0.1",
+              "protocol": "vless",
+              "settings": {
+                "clients": [{ "id": "${VLESS_UUID}", "level": 0 }],
+                "decryption": "none"
+              },
+              "streamSettings": {
+                "network": "ws",
+                "wsSettings": { "path": "/ws" }
+              }
+            }],
+            "outbounds": [{
+              "protocol": "freedom",
+              "settings": { "domainStrategy": "UseIPv4" }
+            }]
+          }
+          XEOF
+
+          sudo cp /tmp/xray-config.json /opt/xray/config.json
+          sudo /opt/xray/xray run -config /opt/xray/config.json > /tmp/xray.log 2>&1 &
+          sleep 3
+          ss -lntp | grep 8080 || { echo "xray failed to listen"; cat /tmp/xray.log; exit 1; }
+
+      - name: Start Cloudflare Quick Tunnel (QUIC)
+        id: tunnel
+        run: |
+          cloudflared tunnel --protocol quic --url http://127.0.0.1:8080 > /tmp/cloudflared.log 2>&1 &
+          TUNNEL_URL=""
+          for i in $(seq 1 40); do
+            TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/cloudflared.log | head -1 || true)
+            if [ -n "$TUNNEL_URL" ]; then break; fi
+            sleep 2
+          done
+
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "tunnel failed"; tail -40 /tmp/cloudflared.log; exit 1
+          fi
+          echo "Tunnel URL: $TUNNEL_URL"
+          echo "tunnel_url=${TUNNEL_URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Probe each candidate IP and build links
+        id: links
+        env:
+          TUNNEL_URL: ${{ steps.tunnel.outputs.tunnel_url }}
+          VLESS_UUID: ${{ steps.proxy.outputs.uuid }}
+          IPS: ${{ github.event.inputs.ips }}
+          DURATION: ${{ github.event.inputs.duration || '4' }}
+        run: |
+          CF_HOST="${TUNNEL_URL#https://}"
+          echo "CF_HOST=${CF_HOST}"
+
+          BODY="/tmp/body.md"
+          {
+            echo "# CF IP test links"
+            echo ""
+            echo "- Runner: $(curl -s --max-time 5 ifconfig.me)"
+            echo "- Tunnel host: \`${CF_HOST}\`"
+            echo "- UUID: \`${VLESS_UUID}\`"
+            echo "- 生成时间(UTC): $(date -u '+%Y-%m-%d %H:%M:%S')"
+            echo "- 保活: ${DURATION} 小时"
+            echo ""
+            echo "## 链接（按下面的探测结果排序后使用）"
+            echo ""
+          } > "$BODY"
+
+          RESULTS="/tmp/results.txt"
+          : > "$RESULTS"
+
+          # 对照组：直接用域名（客户端自己解析，等价于现在线上的行为）
+          D_RESULT=$(curl -s --max-time 10 --resolve "${CF_HOST}:443:$(dig +short "$CF_HOST" A | head -1)" \
+              -o /dev/null -w '%{time_connect}|%{time_appconnect}|%{time_starttransfer}' \
+              "https://${CF_HOST}/ws" 2>/dev/null || echo "0|0|0")
+          echo "DNS|domain-resolved|${D_RESULT}" >> "$RESULTS"
+
+          for IP in $(echo "$IPS" | tr ',' ' '); do
+            R=$(curl -s --max-time 10 --resolve "${CF_HOST}:443:${IP}" \
+                  -o /dev/null -w '%{time_connect}|%{time_appconnect}|%{time_starttransfer}' \
+                  "https://${CF_HOST}/ws" 2>/dev/null || echo "0|0|0")
+            echo "IP|${IP}|${R}" >> "$RESULTS"
+          done
+
+          echo "=== probe results (从 runner 看，仅供参考) ==="
+          cat "$RESULTS"
+
+          # 生成链接：能完成 TLS 握手的都生成
+          echo "## 链接列表" >> "$BODY"
+          echo "" >> "$BODY"
+
+          while IFS='|' read -r kind addr c t ttfb; do
+            [ "$t" = "0" ] && [ "$kind" = "IP" ] && { echo "- SKIP ${addr}: TLS 握手失败"; continue; }
+
+            if [ "$kind" = "DNS" ]; then
+              SERVER="${CF_HOST}"
+              NAME="CF-DNS-默认"
+            else
+              SERVER="${addr}"
+              NAME="CF-IP-${addr}"
+            fi
+
+            LINK="vless://${VLESS_UUID}@${SERVER}:443?encryption=none&security=tls&sni=${CF_HOST}&type=ws&host=${CF_HOST}&path=%2Fws#${NAME}"
+            echo "- \`${NAME}\`  connect=${c}s tls=${t}s ttfb=${ttfb}s" >> "$BODY"
+            echo "" >> "$BODY"
+            echo '```' >> "$BODY"
+            echo "$LINK" >> "$BODY"
+            echo '```' >> "$BODY"
+            echo "" >> "$BODY"
+            echo "LINK|${NAME}|${LINK}" >> "$RESULTS"
+          done < "$RESULTS"
+
+          echo "=== 最终 body ==="
+          cat "$BODY"
+
+      - name: Publish links to draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view vpn-ip-test >/dev/null 2>&1; then
+            gh release edit vpn-ip-test --notes-file /tmp/body.md
+            echo "updated existing release"
+          else
+            gh release create vpn-ip-test --draft --title "VPN IP test links" --notes-file /tmp/body.md
+            echo "created release"
+          fi
+          gh release view vpn-ip-test --json isDraft,url --jq '{isDraft,url}'
+
+      - name: Keep Alive
+        env:
+          DURATION: ${{ github.event.inputs.duration || '4' }}
+        run: |
+          echo "Keeping alive for ${DURATION} hours..."
+          END_TIME=$(($(date +%s) + DURATION * 3600))
+          while [ "$(date +%s)" -lt "$END_TIME" ]; do
+            sleep 300
+            echo "[$(date -u)] alive; xray=$(pgrep -c xray || echo 0) cloudflared=$(pgrep -c cloudflared || echo 0)"
+          done
