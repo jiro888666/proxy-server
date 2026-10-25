@@ -104,7 +104,7 @@ jobs:
             }],
             "outbounds": [{
               "protocol": "freedom",
-              "settings": { "domainStrategy": "UseIPv4" }
+              "settings": {}
             }]
           }
           XEOF
@@ -138,13 +138,13 @@ jobs:
           PROXY_PORT="${PROXY_PORT:-8080}"
 
           if [ "$CF_TUNNEL_MODE" = "named" ] && [ -n "$CF_TUNNEL_TOKEN" ]; then
-            cloudflared tunnel --protocol quic run --token "${CF_TUNNEL_TOKEN}" &
+            cloudflared tunnel --protocol http2 run --token "${CF_TUNNEL_TOKEN}" &
             sleep 5
             echo "tunnel_mode=named" >> $GITHUB_OUTPUT
             echo "tunnel_running=true" >> $GITHUB_OUTPUT
           else
             echo ">>> Starting Quick Tunnel..."
-            cloudflared tunnel --protocol quic --url http://127.0.0.1:${PROXY_PORT} > /tmp/cloudflared.log 2>&1 &
+            cloudflared tunnel --protocol http2 --url http://127.0.0.1:${PROXY_PORT} > /tmp/cloudflared.log 2>&1 &
             
             for i in $(seq 1 30); do
               TUNNEL_URL=$(grep -oP 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cloudflared.log | head -1)
@@ -167,23 +167,18 @@ jobs:
           PROXY_MODE: ${{ steps.proxy.outputs.proxy_mode }}
           VLESS_UUID: ${{ steps.proxy.outputs.vless_uuid }}
           TUNNEL_URL: ${{ steps.tunnel.outputs.tunnel_url }}
-          PREFERRED_IP: '104.27.0.1'
         run: |
           echo "=========================================================="
           echo "  PROXY NODE READY"
           echo "=========================================================="
           if [ "$PROXY_MODE" = "vless" ]; then
             CF_HOST=$(echo "${TUNNEL_URL}" | sed 's|https://||')
-            VLESS_LINK="vless://${VLESS_UUID}@${PREFERRED_IP}:443?encryption=none&security=tls&sni=${CF_HOST}&type=ws&host=${CF_HOST}&path=%2Fws#GH-CF-IP"
-            VLESS_LINK_FALLBACK="vless://${VLESS_UUID}@${CF_HOST}:443?encryption=none&security=tls&sni=${CF_HOST}&type=ws&host=${CF_HOST}&path=%2Fws#GH-CF-Proxy"
+            VLESS_LINK="vless://${VLESS_UUID}@${CF_HOST}:443?encryption=none&security=tls&sni=${CF_HOST}&type=ws&host=${CF_HOST}&path=%2Fws#GH-CF-Proxy"
             echo ""
-            echo "VLESS Link (preferred IP ${PREFERRED_IP}):"
+            echo "VLESS Link:"
             echo "${VLESS_LINK}"
             echo ""
-            echo "VLESS Link (fallback, direct domain):"
-            echo "${VLESS_LINK_FALLBACK}"
-            echo ""
-            echo "## VLESS Link (preferred IP)" >> $GITHUB_STEP_SUMMARY
+            echo "## VLESS Link" >> $GITHUB_STEP_SUMMARY
             echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
             echo "${VLESS_LINK}" >> $GITHUB_STEP_SUMMARY
             echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
@@ -196,7 +191,6 @@ jobs:
           PROXY_MODE: ${{ steps.proxy.outputs.proxy_mode }}
           VLESS_UUID: ${{ steps.proxy.outputs.vless_uuid }}
           TUNNEL_URL: ${{ steps.tunnel.outputs.tunnel_url }}
-          PREFERRED_IP: '104.27.0.1'
         run: |
           if [ -z "$FS_TOKEN" ]; then
             echo "FS_TOKEN not configured"
@@ -205,9 +199,8 @@ jobs:
 
           if [ "$PROXY_MODE" = "vless" ]; then
             CF_HOST=$(echo "${TUNNEL_URL}" | sed 's|https://||')
-            VLESS_LINK="vless://${VLESS_UUID}@${PREFERRED_IP}:443?encryption=none&security=tls&sni=${CF_HOST}&type=ws&host=${CF_HOST}&path=%2Fws#GH-CF-IP"
-            VLESS_FALLBACK="vless://${VLESS_UUID}@${CF_HOST}:443?encryption=none&security=tls&sni=${CF_HOST}&type=ws&host=${CF_HOST}&path=%2Fws#GH-CF-Proxy"
-            CONTENT="github\n\n${VLESS_LINK}\n\n备用(域名直连):\n${VLESS_FALLBACK}"
+            VLESS_LINK="vless://${VLESS_UUID}@${CF_HOST}:443?encryption=none&security=tls&sni=${CF_HOST}&type=ws&host=${CF_HOST}&path=%2Fws#GH-CF-Proxy"
+            CONTENT="github\n\n${VLESS_LINK}"
           else
             CONTENT="github\n\nSS Server: ${TUNNEL_URL}"
           fi
