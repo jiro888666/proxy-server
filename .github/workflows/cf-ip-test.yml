@@ -1,7 +1,7 @@
 name: CF IP Test (no feishu)
 
 # 测试用：同一个 quick tunnel，生成多条指向不同 Cloudflare 边缘 IP 的 VLESS 链接
-# 目的：客户端只需导入链接，不改任何设置，直接对比哪个 IP 快
+# 目的：客户端（Hiddify）只导入链接，不改任何设置，直接对比哪个 IP 快
 # 不发飞书，结果写入 draft release "vpn-ip-test"，用完删掉
 
 on:
@@ -29,8 +29,10 @@ jobs:
     steps:
       - name: Show runner location
         run: |
-          echo "Runner IP: $(curl -s --max-time 5 ifconfig.me)"
-          curl -s --max-time 5 "http://ip-api.com/json/$(curl -s --max-time 5 ifconfig.me)?fields=country,city,isp" || true
+          RIP=$(curl -s --max-time 5 ifconfig.me)
+          echo "Runner IP: $RIP"
+          curl -s --max-time 8 "http://ip-api.com/json/${RIP}?fields=country,city,isp" || true
+          echo ""
 
       - name: Tune kernel (BBR + FastOpen)
         run: |
@@ -119,68 +121,59 @@ jobs:
           DURATION: ${{ github.event.inputs.duration || '4' }}
         run: |
           CF_HOST="${TUNNEL_URL#https://}"
-          echo "CF_HOST=${CF_HOST}"
+          DNS_IP=$(getent ahostsv4 "$CF_HOST" | awk '{print $1; exit}')
+          echo "CF_HOST=${CF_HOST} DNS_IP=${DNS_IP}"
 
-          BODY="/tmp/body.md"
           {
             echo "# CF IP test links"
             echo ""
             echo "- Runner: $(curl -s --max-time 5 ifconfig.me)"
-            echo "- Tunnel host: \`${CF_HOST}\`"
+            echo "- Tunnel host: \`${CF_HOST}\` （DNS 解析到 ${DNS_IP}）"
             echo "- UUID: \`${VLESS_UUID}\`"
             echo "- 生成时间(UTC): $(date -u '+%Y-%m-%d %H:%M:%S')"
             echo "- 保活: ${DURATION} 小时"
             echo ""
-            echo "## 链接（按下面的探测结果排序后使用）"
+            echo "> 握手耗时是从 GitHub runner（美国）测的，只能证明该 IP 能路由到这条隧道，不代表国内速度。国内哪个快请自行切换对比。"
             echo ""
-          } > "$BODY"
+          } > /tmp/body.md
 
-          RESULTS="/tmp/results.txt"
-          : > "$RESULTS"
-
-          # 对照组：直接用域名（客户端自己解析，等价于现在线上的行为）
-          D_RESULT=$(curl -s --max-time 10 --resolve "${CF_HOST}:443:$(dig +short "$CF_HOST" A | head -1)" \
-              -o /dev/null -w '%{time_connect}|%{time_appconnect}|%{time_starttransfer}' \
-              "https://${CF_HOST}/ws" 2>/dev/null || echo "0|0|0")
-          echo "DNS|domain-resolved|${D_RESULT}" >> "$RESULTS"
-
-          for IP in $(echo "$IPS" | tr ',' ' '); do
-            R=$(curl -s --max-time 10 --resolve "${CF_HOST}:443:${IP}" \
-                  -o /dev/null -w '%{time_connect}|%{time_appconnect}|%{time_starttransfer}' \
-                  "https://${CF_HOST}/ws" 2>/dev/null || echo "0|0|0")
-            echo "IP|${IP}|${R}" >> "$RESULTS"
+          : > /tmp/probe.txt
+          for IP in $(echo "${DNS_IP} $IPS" | tr ',' ' '); do
+            R=$(curl -s --max-time 6 --resolve "${CF_HOST}:443:${IP}" -o /dev/null \
+                  -w '%{time_connect}|%{time_appconnect}|%{time_starttransfer}' \
+                  "https://${CF_HOST}/ws" 2>/dev/null || true)
+            [ -z "$R" ] && R="0|0|0"
+            echo "${IP}|${R}" >> /tmp/probe.txt
           done
+          echo "=== probe (from runner) ==="
+          cat /tmp/probe.txt
 
-          echo "=== probe results (从 runner 看，仅供参考) ==="
-          cat "$RESULTS"
+          echo "## 链接列表" >> /tmp/body.md
+          echo "" >> /tmp/body.md
 
-          # 生成链接：能完成 TLS 握手的都生成
-          echo "## 链接列表" >> "$BODY"
-          echo "" >> "$BODY"
-
-          while IFS='|' read -r kind addr c t ttfb; do
-            [ "$t" = "0" ] && [ "$kind" = "IP" ] && { echo "- SKIP ${addr}: TLS 握手失败"; continue; }
-
-            if [ "$kind" = "DNS" ]; then
+          while IFS='|' read -r IP C T TTFB; do
+            if [ "$IP" = "$DNS_IP" ]; then
               SERVER="${CF_HOST}"
-              NAME="CF-DNS-默认"
+              NAME="CF-DNS-default"
             else
-              SERVER="${addr}"
-              NAME="CF-IP-${addr}"
+              SERVER="${IP}"
+              NAME="CF-IP-${IP}"
             fi
-
             LINK="vless://${VLESS_UUID}@${SERVER}:443?encryption=none&security=tls&sni=${CF_HOST}&type=ws&host=${CF_HOST}&path=%2Fws#${NAME}"
-            echo "- \`${NAME}\`  connect=${c}s tls=${t}s ttfb=${ttfb}s" >> "$BODY"
-            echo "" >> "$BODY"
-            echo '```' >> "$BODY"
-            echo "$LINK" >> "$BODY"
-            echo '```' >> "$BODY"
-            echo "" >> "$BODY"
-            echo "LINK|${NAME}|${LINK}" >> "$RESULTS"
-          done < "$RESULTS"
+            {
+              echo "### ${NAME}"
+              echo ""
+              echo "connect=${C}s  tls=${T}s  ttfb=${TTFB}s"
+              echo ""
+              echo '```'
+              echo "$LINK"
+              echo '```'
+              echo ""
+            } >> /tmp/body.md
+          done < /tmp/probe.txt
 
-          echo "=== 最终 body ==="
-          cat "$BODY"
+          echo "=== body ==="
+          cat /tmp/body.md
 
       - name: Publish links to draft release
         env:
