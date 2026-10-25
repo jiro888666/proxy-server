@@ -207,28 +207,37 @@ jobs:
             CF_HOST=$(echo "${TUNNEL_URL}" | sed 's|https://||')
             VLESS_LINK="vless://${VLESS_UUID}@${PREFERRED_IP}:443?encryption=none&security=tls&sni=${CF_HOST}&type=ws&host=${CF_HOST}&path=%2Fws#GH-CF-IP"
             VLESS_FALLBACK="vless://${VLESS_UUID}@${CF_HOST}:443?encryption=none&security=tls&sni=${CF_HOST}&type=ws&host=${CF_HOST}&path=%2Fws#GH-CF-Proxy"
-            CONTENT="github\n\n${VLESS_LINK}\n\n备用(域名直连):\n${VLESS_FALLBACK}"
-          else
-            CONTENT="github\n\nSS Server: ${TUNNEL_URL}"
           fi
 
           webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/${FS_TOKEN}"
-          message=$(printf '{"msg_type":"text","content":{"text":"%s"}}' "$CONTENT")
-          max_retries=3
-          wait_time=1
-          
-          for i in $(seq 1 $max_retries); do
-              response=$(curl -s -H "Content-Type: application/json" -X POST -d "$message" "$webhook_url")
+
+          send_msg() {
+            local text="$1"
+            local max_retries=3
+            local wait_time=1
+            local i response
+            for i in $(seq 1 $max_retries); do
+              response=$(curl -s -H "Content-Type: application/json" -X POST \
+                -d "$(printf '{"msg_type":"text","content":{"text":"%s"}}' "$text")" \
+                "$webhook_url")
               if echo "$response" | grep -q '"code":11232'; then
-                  echo "Rate limited, retrying in ${wait_time}s... (attempt $i)"
-                  sleep $wait_time
-                  wait_time=$((wait_time * 2))
+                echo "Rate limited, retrying in ${wait_time}s... (attempt $i)"
+                sleep $wait_time
+                wait_time=$((wait_time * 2))
               else
-                  echo "Message sent successfully or other error:"
-                  echo "$response"
-                  break
+                echo "Response: $response"
+                break
               fi
-          done
+            done
+          }
+
+          if [ "$PROXY_MODE" = "vless" ]; then
+            send_msg "github 主用（优选IP）\n\n${VLESS_LINK}"
+            sleep 2
+            send_msg "github 备用（域名直连）\n\n${VLESS_FALLBACK}"
+          else
+            send_msg "github\n\nSS Server: ${TUNNEL_URL}"
+          fi
           echo "Sent to Feishu"
 
       - name: Keep Alive
